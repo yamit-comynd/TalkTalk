@@ -11,7 +11,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR"
+cd "$(dirname "$SCRIPT_DIR")"   # project root
 
 MAKE_DMG=false
 
@@ -94,12 +94,12 @@ find "$APP_PATH/Contents/MacOS" -type f -perm +111 \
 
 # 3. Sign the main executable with entitlements
 codesign --force --sign - --timestamp=none \
-  --entitlements entitlements.plist \
+  --entitlements packaging/entitlements.plist \
   "$APP_PATH/Contents/MacOS/TalkTalk"
 
 # 4. Sign the app bundle itself (must be last)
 codesign --force --sign - --timestamp=none \
-  --entitlements entitlements.plist \
+  --entitlements packaging/entitlements.plist \
   "$APP_PATH"
 
 echo "==> Signing complete"

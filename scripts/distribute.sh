@@ -15,7 +15,8 @@
 # Output: dist/TalkTalk-<version>.dmg  (ready to share with testers)
 
 set -euo pipefail
-cd "$(dirname "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$(dirname "$SCRIPT_DIR")"   # project root
 
 # ── Configuration (fill these in or export as env vars) ───────────────────────
 
@@ -60,7 +61,7 @@ if [[ "$SKIP_BUILD" == false ]]; then
   echo "==> Building TalkTalk ${APP_VERSION}…"
   # Update version in spec before building
   sed -i '' "s/version=\"[^\"]*\"/version=\"${APP_VERSION}\"/" TalkTalk.spec
-  ./build.sh   # builds to dist/TalkTalk.app, installs to /Applications, resets TCC
+  ./scripts/build.sh   # builds to dist/TalkTalk.app, installs to /Applications, resets TCC
 fi
 
 if [[ ! -d "$APP_PATH" ]]; then
@@ -87,13 +88,13 @@ find "$APP_PATH/Contents/MacOS" -type f -perm +111 \
 # Sign the main binary with entitlements
 codesign --force --sign "$DEVELOPER_ID" --timestamp \
   --options runtime \
-  --entitlements entitlements.plist \
+  --entitlements packaging/entitlements.plist \
   "$APP_PATH/Contents/MacOS/TalkTalk"
 
 # Sign the bundle
 codesign --force --sign "$DEVELOPER_ID" --timestamp \
   --options runtime \
-  --entitlements entitlements.plist \
+  --entitlements packaging/entitlements.plist \
   "$APP_PATH"
 
 echo "==> Verifying signature…"

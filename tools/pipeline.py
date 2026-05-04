@@ -1,17 +1,21 @@
 """
 Interactive test for the audio capture + transcription pipeline.
 
-Usage:
-    .venv/bin/python3 pipeline.py
-    .venv/bin/python3 pipeline.py --model small --device 3
+Usage (run from project root):
+    .venv/bin/python3 tools/pipeline.py
+    .venv/bin/python3 tools/pipeline.py --model small --device 3
 
 Press Enter to start recording, Enter again to stop and transcribe.
 Press Ctrl+C to quit.
 """
 
 import argparse
-import time
+import os
 import sys
+import time
+
+# Ensure project root is on sys.path so bare imports resolve correctly.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from recorder import AudioRecorder
 from transcriber import Transcriber

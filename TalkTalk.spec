@@ -47,7 +47,7 @@ a = Analysis(
     ],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=["hook_freeze_support.py"],
+    runtime_hooks=["packaging/hook_freeze_support.py"],
     excludes=[
         "matplotlib",
         "tkinter",

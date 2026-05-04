@@ -7,7 +7,8 @@
 #   ./package_release.sh --skip-build 0.0.1  — reuse existing dist/TalkTalk.app
 
 set -euo pipefail
-cd "$(dirname "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$(dirname "$SCRIPT_DIR")"   # project root
 
 # ── Args ──────────────────────────────────────────────────────────────────────
 
@@ -36,7 +37,7 @@ echo "════════════════════════�
 if [[ "$SKIP_BUILD" == false ]]; then
   echo ""
   echo "==> Building TalkTalk ${VERSION}…"
-  APP_VERSION="$VERSION" ./build.sh --dmg
+  APP_VERSION="$VERSION" ./scripts/build.sh --dmg
 else
   echo ""
   echo "==> Skipping build (--skip-build)"
@@ -74,7 +75,7 @@ CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 # Strategy A: pandoc + weasyprint
 if command -v pandoc &>/dev/null && python3 -c "import weasyprint" 2>/dev/null; then
   echo "    Using pandoc + weasyprint"
-  pandoc TESTER_GUIDE.md \
+  pandoc docs/TESTER_GUIDE.md \
     --standalone \
     --metadata title="TalkTalk Tester Guide v${VERSION}" \
     --pdf-engine=weasyprint \
@@ -84,7 +85,7 @@ if command -v pandoc &>/dev/null && python3 -c "import weasyprint" 2>/dev/null; 
 # Strategy B: pandoc → HTML → Chrome headless → PDF
 elif command -v pandoc &>/dev/null; then
   echo "    pandoc found — generating HTML then converting via Chrome"
-  pandoc TESTER_GUIDE.md \
+  pandoc docs/TESTER_GUIDE.md \
     --standalone \
     --metadata title="TalkTalk Tester Guide v${VERSION}" \
     -o "$HTML_OUT"
@@ -98,7 +99,7 @@ elif command -v pandoc &>/dev/null; then
 # Strategy C: pure Python → styled HTML → Chrome headless → PDF
 else
   echo "    pandoc not found — generating styled HTML via Python"
-  python3 generate_guide_html.py "$HTML_OUT" "$VERSION"
+  python3 scripts/generate_guide_html.py "$HTML_OUT" "$VERSION"
   if [[ -x "$CHROME" ]]; then
     echo "    Converting HTML → PDF via Chrome headless"
     "$CHROME" --headless --disable-gpu \

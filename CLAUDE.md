@@ -32,6 +32,7 @@ TalkTalk is a macOS menu-bar dictation app. The user holds a hotkey (default: Ri
 ## File map
 
 ```
+# ── Core application (Python source — stays at root for PyInstaller compatibility)
 app.py              Entry point + rumps App class. Owns all state and wires everything together.
 config.py           Load/save ~/.talktalk/config.json. All defaults live here.
 device_manager.py   Mic enumeration, system-default resolution, PortAudio reinit.
@@ -43,15 +44,33 @@ hud.py              HUD (spinning circle) + LoadingToast (pill). Pure AppKit/Qua
 permissions.py      TCC permission checks (IOHIDCheckAccess, AXIsProcessTrusted) and request flows.
 key_capture.py      capture_hotkey() — floating NSPanel that waits for a key press.
 vocabulary.py       Load/save/format ~/.talktalk/vocabulary.json as Whisper initial_prompt.
-pipeline.py         DEV ONLY — interactive CLI test for the record → transcribe pipeline.
-hook_freeze_support.py  PyInstaller runtime hook: calls multiprocessing.freeze_support() early.
-TalkTalk.spec       PyInstaller build spec. Controls bundled deps, data files, Info.plist.
-build.sh            Full build pipeline: venv → pip → PyInstaller → codesign → install → TCC reset.
-distribute.sh       Packages dist/TalkTalk.app into a signed .dmg for tester distribution.
-package_release.sh  Copies the .dmg to release/ with version tagging.
-entitlements.plist  macOS entitlements required for codesign (com.apple.security.*).
-generate_guide_html.py  Converts TESTER_GUIDE.md to a self-contained HTML file for testers.
-assets/             menubar.icns (menu bar icon), TalkTalk.icns (Dock/Finder icon), vocabulary CSVs.
+
+# ── Packaging
+packaging/
+  TalkTalk.spec           PyInstaller build spec. Controls bundled deps, data files, Info.plist.
+  entitlements.plist      macOS entitlements required for codesign (com.apple.security.*).
+  hook_freeze_support.py  PyInstaller runtime hook: calls multiprocessing.freeze_support() early.
+
+# ── Build & distribution scripts (all must be run from project root)
+scripts/
+  build.sh                Full build: venv → pip → PyInstaller → codesign → install → TCC reset.
+  distribute.sh           Re-signs with Developer ID, notarizes, and wraps in a .dmg.
+  package_release.sh      Combines build + guide generation into a versioned release/ bundle.
+  generate_guide_html.py  Converts docs/TESTER_GUIDE.md to a self-contained HTML file.
+
+# ── Developer tools
+tools/
+  pipeline.py     Interactive CLI test for the record → transcribe pipeline. Not shipped.
+
+# ── Documentation
+docs/
+  TESTER_GUIDE.md  End-user guide sent to testers.
+
+# ── Assets
+assets/
+  menubar.icns    Menu bar icon (16×16 template image).
+  TalkTalk.icns   App icon (Dock/Finder/About).
+  *.csv / *.txt   Bundled vocabulary word lists.
 ```
 
 ---
@@ -237,15 +256,15 @@ pip install -r requirements.txt
 python app.py
 
 # Test the audio pipeline interactively (no permissions needed)
-python pipeline.py
-python pipeline.py --model small --device 3
+python tools/pipeline.py
+python tools/pipeline.py --model small --device 3
 ```
 
 ### Building a distributable .app
 
 ```bash
-./build.sh          # → dist/TalkTalk.app, installs to /Applications, resets TCC
-./build.sh --dmg    # same + wraps in dist/TalkTalk.dmg
+./scripts/build.sh          # → dist/TalkTalk.app, installs to /Applications, resets TCC
+./scripts/build.sh --dmg    # same + wraps in dist/TalkTalk.dmg
 ```
 
 `build.sh` maintains a separate ``.venv-build`` (Python 3.13) so the dev venv is never touched. It:
@@ -259,8 +278,8 @@ python pipeline.py --model small --device 3
 ### Creating a tester release
 
 ```bash
-./distribute.sh       # wraps dist/TalkTalk.app into release/TalkTalk-vX.X.X.dmg
-./package_release.sh  # copies to release/ with version metadata
+./scripts/distribute.sh       # re-signs with Developer ID, notarizes, wraps in .dmg
+./scripts/package_release.sh  # combines build + guide into a versioned release/ bundle
 ```
 
 ### PyInstaller spec (`TalkTalk.spec`)

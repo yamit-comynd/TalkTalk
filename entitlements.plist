@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Microphone access (sounddevice) -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+
+    <!-- Accessibility (CGEventPost for Cmd+V keystroke injection) -->
+    <key>com.apple.security.accessibility</key>
+    <true/>
+
+    <!-- Automation / Apple Events (osascript → System Events) -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+
+    <!-- Required for PyInstaller: allows loading bundled .dylib / .so files
+         that are not signed with the same identity as the app. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- Required for PyInstaller: ctranslate2 / faster-whisper JIT pages. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+</dict>
+</plist>

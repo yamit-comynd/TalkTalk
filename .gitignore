@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+.venv-build/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec.bak
+
+# Release packages
+release/
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Claude Code project settings
+.claude/
+
+# App runtime data (user-specific, not source)
+~/.talktalk/

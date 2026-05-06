@@ -211,6 +211,16 @@ class TalkTalkApp(rumps.App):
         self._current_app_name     = ""
         self._pre_profile_settings: dict = {}  # settings saved before profile was applied
 
+        # Last known set of input device names — used by _do_check_device to detect
+        # plug/unplug events without rebuilding the mic menu on every 5-second tick.
+        self._last_known_inputs: frozenset = frozenset()
+
+        # When non-None, _hud_tick will call _start_key_listener() on the main
+        # thread once monotonic time passes this value.  Used to defer the restart
+        # after wake-from-sleep so TSMGetInputSourceProperty (pynput init) is called
+        # on the main thread, not a background thread.
+        self._pending_listener_restart_at: float | None = None
+
         # Build submenus
         self._mic_menu       = rumps.MenuItem("Microphone")
         self._lang_menu      = rumps.MenuItem("Language")
@@ -310,7 +320,6 @@ class TalkTalkApp(rumps.App):
     def _hud_tick(self, _):
         # Detect when background model load completes
         if self._model_load_done and self._loading_toast._state == "loading":
-            self.title = _IDLE
             if self._model_ready:
                 self._loading_toast.show_ready()
                 HUD.play_ready()
@@ -322,6 +331,21 @@ class TalkTalkApp(rumps.App):
                     message="Check disk space or internet (first download). "
                             "See ~/.talktalk/talktalk.log for details.",
                 )
+
+        # Title management — must only happen on the main thread.
+        # Background threads (CGEventTap, executor) update _hud_state only; we derive
+        # self.title here so AppKit's NSStatusItem._adjustLength is never called from a
+        # performSelectorOnMainThread: dispatch, which crashes on macOS 26.
+        if self._loading_toast._state == "loading":
+            target_title = _LOADING
+        elif self._hud_state == "recording":
+            target_title = _RECORDING
+        elif self._hud_state == "processing":
+            target_title = _PROCESSING
+        else:
+            target_title = _IDLE
+        if self.title != target_title:
+            self.title = target_title
 
         # Silence detection and auto-stop.
         if self._hud_state == "recording":
@@ -363,6 +387,16 @@ class TalkTalkApp(rumps.App):
         if self._history_needs_rebuild:
             self._history_needs_rebuild = False
             self._rebuild_history_menu()
+
+        # Deferred key listener restart — set by _on_system_wake so that
+        # pynput's TSMGetInputSourceProperty call (during listener init) happens
+        # on the main thread rather than a threading.Timer background thread,
+        # which crashes on macOS 26.
+        if (self._pending_listener_restart_at is not None
+                and time.monotonic() >= self._pending_listener_restart_at):
+            self._pending_listener_restart_at = None
+            log.info("Restarting key listener (deferred to main thread)")
+            self._start_key_listener()
 
     # ------------------------------------------------------------------
     # Permission setup — one-shot timer (fires once after run loop starts)
@@ -476,17 +510,14 @@ class TalkTalkApp(rumps.App):
         self._reinit_recorder()
 
         # 3. Restart the key listener — pynput wraps a CGEventTap which macOS
-        #    invalidates during sleep.  We delay by 2 s because pynput's new
-        #    listener thread calls TSMGetInputSourceProperty (HIToolbox) during
-        #    init, which on macOS 26 asserts it must run on the main dispatch
-        #    queue.  Immediately after wake, TSM state hasn't resettled yet and
-        #    the assertion fires.  A short delay lets the system fully resume
-        #    before we spin up a new listener thread.
+        #    invalidates during sleep.  We delay by 2 s and route through _hud_tick
+        #    so _start_key_listener() is called on the main thread.  pynput's new
+        #    listener calls TSMGetInputSourceProperty (HIToolbox) during init, which
+        #    on macOS 26 asserts it must run on the main dispatch queue.  Calling it
+        #    from threading.Timer (background thread) crashes; _hud_tick is safe.
         if self._im_granted:
-            log.info("Scheduling key listener restart (2 s post-wake delay)")
-            t = threading.Timer(2.0, self._start_key_listener)
-            t.daemon = True
-            t.start()
+            log.info("Scheduling key listener restart (2 s, deferred to main thread via _hud_tick)")
+            self._pending_listener_restart_at = time.monotonic() + 2.0
 
         log.info("Wake recovery complete")
 
@@ -619,18 +650,28 @@ class TalkTalkApp(rumps.App):
                 self._active_device_idx  = None
                 self.recorder = AudioRecorder(device=None)
                 self._rebuild_mic_menu()
-            else:
-                self._rebuild_mic_menu()
+                return
         else:
             best_idx, best_name = device_manager.resolve_device(self._cfg["mic_priority"])
             if best_name and best_name != self._active_device_name:
                 self._switch_to(best_name)
+                return
             elif not best_name and self._cfg.get("mic_priority"):
                 # Pinned device just disappeared — fall back to system default.
                 self._reinit_recorder()
                 self._rebuild_mic_menu()
-            else:
-                self._rebuild_mic_menu()
+                return
+
+        # No device switch needed. Rebuild the mic menu only if the set of
+        # available inputs changed (device plugged in or unplugged) — not on
+        # every tick, to avoid touching NSMenu while the menu is open.
+        try:
+            current_inputs = frozenset(name for _, name in device_manager.list_inputs())
+        except Exception:
+            return
+        if current_inputs != self._last_known_inputs:
+            self._last_known_inputs = current_inputs
+            self._rebuild_mic_menu()
 
     # ------------------------------------------------------------------
     # Language submenu
@@ -819,7 +860,6 @@ class TalkTalkApp(rumps.App):
             self._recording_key    = key
             self._recorder_started = False
             self._recorder_had_audio = False
-            self.title             = _RECORDING
             self._hud_state        = "recording"
             HUD.play_start()
             # The sleep + recorder.start() are offloaded so the CGEventTap
@@ -841,7 +881,6 @@ class TalkTalkApp(rumps.App):
             self._recording     = False
             self._recording_key = None
             self._hud_state     = "hidden"
-            self.title          = _IDLE
             threading.Thread(target=self._reinit_recorder, daemon=True).start()
 
     def _stop_recording(self):
@@ -853,23 +892,19 @@ class TalkTalkApp(rumps.App):
         self._recording = False
         HUD.play_stop()
         if not self._recorder_started:
-            self.title      = _IDLE
             self._hud_state = "hidden"
             return
         try:
             audio = self.recorder.stop()
         except Exception as exc:
             log.warning("recorder.stop() failed: %s — reinitialising", exc)
-            self.title      = _IDLE
             self._hud_state = "hidden"
             threading.Thread(target=self._reinit_recorder, daemon=True).start()
             return
         duration = len(audio) / self.recorder.sample_rate
         if duration < 0.3:
-            self.title      = _IDLE
             self._hud_state = "hidden"
             return
-        self.title      = _PROCESSING
         self._hud_state = "processing"
         self._executor.submit(self._transcribe_and_inject, audio)
 
@@ -887,7 +922,6 @@ class TalkTalkApp(rumps.App):
         transcriber = self._transcriber
         if transcriber is None:
             log.warning("Transcriber not available — dropping audio")
-            self.title      = _IDLE
             self._hud_state = "hidden"
             return
         try:
@@ -971,7 +1005,6 @@ class TalkTalkApp(rumps.App):
                 message=str(exc),
             )
         finally:
-            self.title = _IDLE
             self._hud_state = "hidden"
 
     def _is_fix_phrase(self, text: str) -> bool:

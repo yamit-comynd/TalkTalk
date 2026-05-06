@@ -132,6 +132,61 @@ At least one hotkey must always be active.
 ### Vocabulary
 Add words or phrases that Whisper should recognise correctly — useful for names, technical terms, or product names it tends to mishear.
 
+- **Add vocabulary…** — type a single word or phrase
+- **Edit vocabulary…** — edit the full list
+- **Import vocabulary…** — import a CSV file (one entry per cell, any layout)
+
+### Recent Dictations
+Every successful transcription is saved to a history list. Click **Recent Dictations** to see your last 10. Click any entry to re-inject that text wherever your cursor is.
+
+Useful when a transcription landed in the wrong window, or you want to repeat something you said earlier without re-recording.
+
+Click **Clear History** to wipe the list.
+
+### Silence Auto-Stop
+By default TalkTalk records until you release the hotkey. With Silence Auto-Stop enabled, it stops automatically once you stop speaking — no need to hold the key for the full duration of a pause.
+
+| Setting | What it does |
+|---------|-------------|
+| **Off** *(default)* | Records until you release the hotkey |
+| **1 second** | Stops 1 second after your voice goes quiet |
+| **2 seconds** | Stops 2 seconds after your voice goes quiet |
+| **3 seconds** | Stops 3 seconds after your voice goes quiet |
+
+> Tip: 2 seconds is a good starting point — short enough to feel snappy, long enough that natural mid-sentence pauses don't cut you off.
+
+### App Profiles
+Different apps call for different language settings. App Profiles lets you save a language mode per app, and TalkTalk switches automatically when you change windows.
+
+**To save a profile for the current app:**
+1. Switch to the app (Mail, Slack, your browser, etc.)
+2. Set your preferred Language Mode
+3. Open the **App Profiles** menu → click **Save settings for [App name]**
+
+From then on, whenever that app is in focus, TalkTalk automatically switches to the saved language mode. When you switch away, your global setting is restored.
+
+To remove a profile, open **App Profiles** → **Clear profile for [App name]**.
+
+---
+
+## Undoing a Dictation
+
+### "Fix that" voice command
+If TalkTalk pastes something wrong, just say **"fix that"** (or "undo that", "scratch that", "delete that", "cancel that") as your next dictation. Instead of pasting, TalkTalk will send **Cmd+Z** to undo the previous paste.
+
+This works in any app that supports undo — which is essentially everything.
+
+### Correction learning
+When you manually fix a word TalkTalk got wrong, TalkTalk notices. About 4 seconds after each injection, it quietly checks whether you edited the text and compares what's there now against what it originally typed.
+
+If it spots a correction — for example you changed "comment" to "CoMYND" — it will:
+- **Automatically add the corrected word** to your vocabulary if it looks like a proper noun (starts with a capital letter)
+- **Show a notification** for other corrections, letting you know what it detected so you can add it manually if you want
+
+Over time this makes Whisper progressively better at recognising the names and terms specific to your work.
+
+> Correction learning works best in standard text fields. It may not detect edits in apps with custom editors (some web apps, Electron apps, terminals).
+
 ---
 
 ## Tips
@@ -142,6 +197,7 @@ Add words or phrases that Whisper should recognise correctly — useful for name
 - **Nothing getting typed?** — check that TalkTalk has Accessibility in System Settings → Privacy & Security → Accessibility.
 - **Hotkey not working?** — check Input Monitoring in System Settings → Privacy & Security → Input Monitoring.
 - **After locking / sleeping your Mac** — TalkTalk recovers automatically on wake. If something seems off, a quick quit-and-relaunch fixes it.
+- **Mic just plugged in or disconnected?** — TalkTalk detects this automatically and updates its device list within a few seconds.
 
 ---
 
@@ -150,6 +206,8 @@ Add words or phrases that Whisper should recognise correctly — useful for name
 - Requires macOS 13 (Ventura) or later
 - The Transliterate mode requires [Ollama](https://ollama.com) running locally with a model installed
 - The first transcription after launch may take a moment while the Whisper model loads — the "Loading model…" pill in the menu bar area will tell you when it's ready
+- Correction learning and "fix that" require Accessibility permission (same one needed for text injection)
+- App Profiles currently save the language mode only — the Whisper model is not switched per-app
 
 ---
 

@@ -27,6 +27,13 @@ from AppKit import (
 )
 from pynput import keyboard
 
+from key_listener import MODIFIER_KEYCODE_TO_KEY, _event_char
+
+# NSEventType integer constants (AppKit enum)
+_NSEventTypeKeyDown      = 10
+_NSEventTypeFlagsChanged = 12
+_VK_ESCAPE               = 53  # kVK_Escape
+
 # ── Human-readable names for pynput Key enum members ──────────────────────
 
 _DISPLAY: dict[str, str] = {
@@ -181,22 +188,47 @@ def capture_hotkey() -> tuple[str, str] | None:
     panel.orderFrontRegardless()
     panel.makeKeyAndOrderFront_(None)
 
-    # ── pynput listener (background thread) ──────────────────────────────
-    def on_press(key):
-        if key == keyboard.Key.esc:
-            result[0] = None
-            done.set()
-            return False   # stop listener
+    # ── NSEvent local monitor (main thread) ──────────────────────────────
+    # Uses a local monitor (not global) because TalkTalk's panel is the key
+    # window here (after activateIgnoringOtherApps_ + makeKeyAndOrderFront_),
+    # so key events are delivered locally.  This runs on the main thread and
+    # does not call TSMGetInputSourceProperty, so it's safe on macOS 26.
 
-        cfg = key_config_name(key)
-        if cfg is None:
-            return          # skip unknown keys — keep listening
+    from AppKit import NSEvent, NSEventMaskKeyDown, NSEventMaskFlagsChanged
 
-        captured[0] = (cfg, key_display_name(key))
-        return False        # stop listener; main loop handles the rest
+    def handle_key(event):
+        """Local event monitor — runs on the main thread during runModalSession_."""
+        if done.is_set() or captured[0] is not None:
+            return event  # already have a result; let the event through
 
-    listener = keyboard.Listener(on_press=on_press)
-    listener.start()
+        t = event.type()
+
+        if t == _NSEventTypeKeyDown:
+            if event.keyCode() == _VK_ESCAPE:
+                result[0] = None
+                done.set()
+            else:
+                ch = _event_char(event)
+                if ch:
+                    key = keyboard.KeyCode.from_char(ch)
+                    cfg = key_config_name(key)
+                    if cfg:
+                        captured[0] = (cfg, key_display_name(key))
+
+        elif t == _NSEventTypeFlagsChanged:
+            kc = event.keyCode()
+            key = MODIFIER_KEYCODE_TO_KEY.get(kc)
+            if key is not None:
+                cfg = key_config_name(key)
+                if cfg:
+                    captured[0] = (cfg, key_display_name(key))
+
+        return event  # don't consume the event
+
+    monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+        NSEventMaskKeyDown | NSEventMaskFlagsChanged,
+        handle_key,
+    )
 
     # ── Modal polling loop (main thread) ──────────────────────────────────
     # Uses Apple's "modal session" pattern so the rest of the app is blocked
@@ -220,7 +252,8 @@ def capture_hotkey() -> tuple[str, str] | None:
 
         time.sleep(0.005)
 
-    listener.stop()
+    if monitor:
+        NSEvent.removeMonitor_(monitor)
     app.endModalSession_(session)
     app.stopModal()
     panel.orderOut_(None)

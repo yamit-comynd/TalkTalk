@@ -55,6 +55,7 @@ import device_manager
 import enhancer
 import history
 import key_capture
+import key_listener
 import permissions
 import vocabulary
 from hud import HUD, LoadingToast, SOUND_START_DURATION
@@ -215,11 +216,6 @@ class TalkTalkApp(rumps.App):
         # plug/unplug events without rebuilding the mic menu on every 5-second tick.
         self._last_known_inputs: frozenset = frozenset()
 
-        # When non-None, _hud_tick will call _start_key_listener() on the main
-        # thread once monotonic time passes this value.  Used to defer the restart
-        # after wake-from-sleep so TSMGetInputSourceProperty (pynput init) is called
-        # on the main thread, not a background thread.
-        self._pending_listener_restart_at: float | None = None
 
         # Build submenus
         self._mic_menu       = rumps.MenuItem("Microphone")
@@ -388,15 +384,6 @@ class TalkTalkApp(rumps.App):
             self._history_needs_rebuild = False
             self._rebuild_history_menu()
 
-        # Deferred key listener restart — set by _on_system_wake so that
-        # pynput's TSMGetInputSourceProperty call (during listener init) happens
-        # on the main thread rather than a threading.Timer background thread,
-        # which crashes on macOS 26.
-        if (self._pending_listener_restart_at is not None
-                and time.monotonic() >= self._pending_listener_restart_at):
-            self._pending_listener_restart_at = None
-            log.info("Restarting key listener (deferred to main thread)")
-            self._start_key_listener()
 
     # ------------------------------------------------------------------
     # Permission setup — one-shot timer (fires once after run loop starts)
@@ -509,15 +496,12 @@ class TalkTalkApp(rumps.App):
         device_manager.reinit_portaudio()
         self._reinit_recorder()
 
-        # 3. Restart the key listener — pynput wraps a CGEventTap which macOS
-        #    invalidates during sleep.  We delay by 2 s and route through _hud_tick
-        #    so _start_key_listener() is called on the main thread.  pynput's new
-        #    listener calls TSMGetInputSourceProperty (HIToolbox) during init, which
-        #    on macOS 26 asserts it must run on the main dispatch queue.  Calling it
-        #    from threading.Timer (background thread) crashes; _hud_tick is safe.
+        # 3. Restart the key listener.  NSEvent monitors survive sleep/wake but
+        #    we stop and re-register them to flush any stale held-key state.
+        #    Safe to call directly on the main thread (no TSM involvement).
         if self._im_granted:
-            log.info("Scheduling key listener restart (2 s, deferred to main thread via _hud_tick)")
-            self._pending_listener_restart_at = time.monotonic() + 2.0
+            log.info("Restarting key listener after wake")
+            self._start_key_listener()
 
         log.info("Wake recovery complete")
 
@@ -826,18 +810,17 @@ class TalkTalkApp(rumps.App):
 
     def _start_key_listener(self):
         # Stop any previously running listener before creating a new one.
-        # This is safe to call both at startup (when self._listener is None)
-        # and when restarting after Input Monitoring is granted mid-session.
+        # Safe to call at startup (self._listener is None) and on mid-session
+        # restarts (permission grant, wake-from-sleep).
         if self._listener is not None:
             try:
                 self._listener.stop()
             except Exception:
                 pass
-        self._listener = keyboard.Listener(
+        self._listener = key_listener.GlobalKeyListener(
             on_press=self._on_press,
             on_release=self._on_release,
         )
-        self._listener.daemon = True
         self._listener.start()
 
     def _on_press(self, key):

@@ -395,8 +395,9 @@ class TalkTalkApp(rumps.App):
 
     def _on_system_wake(self):
         """Reset everything that becomes stale after a sleep/wake cycle."""
-        # 1. Clear any stuck recording state (hotkey held when Mac slept).
-        if self._recording:
+        # 1. Clear any stuck recording state (hotkey held when Mac slept, or mic
+        #    opened but key released just before sleep).
+        if self._recording or self._recorder_started:
             log.info("Clearing stuck recording state from before sleep")
             try:
                 self.recorder.stop()
@@ -467,7 +468,11 @@ class TalkTalkApp(rumps.App):
 
     def _rebuild_mic_menu(self):
         mode   = self._cfg.get("mic_mode", "system")
-        inputs = device_manager.list_inputs()
+        try:
+            inputs = device_manager.list_inputs()
+        except Exception as exc:
+            log.warning("list_inputs() failed in mic menu rebuild: %s", exc)
+            inputs = []
         pinned = (self._cfg.get("mic_priority") or [None])[0]
 
         if self._mic_menu._menu is not None:
@@ -510,9 +515,15 @@ class TalkTalkApp(rumps.App):
         self._switch_to(name)
 
     def _switch_to(self, name: str):
+        if self._recording:
+            return
         if name == self._active_device_name:
             return
-        inputs_by_name = {n: i for i, n in device_manager.list_inputs()}
+        try:
+            inputs_by_name = {n: i for i, n in device_manager.list_inputs()}
+        except Exception as exc:
+            log.warning("list_inputs() failed in _switch_to: %s", exc)
+            return
         if name not in inputs_by_name:
             return
         self._active_device_name = name
@@ -522,6 +533,14 @@ class TalkTalkApp(rumps.App):
 
     @rumps.timer(_DEVICE_CHECK_INTERVAL)
     def _check_device(self, _):
+        if self._recording:
+            return
+        try:
+            self._do_check_device()
+        except Exception as exc:
+            log.warning("Device check error: %s", exc)
+
+    def _do_check_device(self):
         mode = self._cfg.get("mic_mode", "system")
         if mode == "system":
             # Detect dock/undock: macOS may have changed which device is default.

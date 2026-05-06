@@ -46,8 +46,11 @@ class AudioRecorder:
             return np.array([], dtype=DTYPE)
         self.is_recording = False
         if self._stream:
-            self._stream.stop()
-            self._stream.close()
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass  # device may have disconnected mid-recording
             self._stream = None
         with self._lock:
             if not self._chunks:
@@ -56,6 +59,9 @@ class AudioRecorder:
         return audio
 
     def _callback(self, indata: np.ndarray, frames: int, time, status):
+        if status:
+            import logging
+            logging.getLogger("talktalk").warning("Audio stream status: %s", status)
         with self._lock:
             self._chunks.append(indata.copy())
         # RMS level for HUD visualization — no lock needed (single float write)

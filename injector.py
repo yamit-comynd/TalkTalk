@@ -51,6 +51,7 @@ def is_ax_trusted() -> bool:
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 _V_KEYCODE      = 9     # macOS HID keycode for 'v'
+_Z_KEYCODE      = 6     # macOS HID keycode for 'z'
 _PASTE_DELAY    = 0.08  # seconds between clipboard write and Cmd+V keystroke
 _RESTORE_DELAY  = 0.50  # seconds to wait before restoring the original clipboard
 
@@ -185,3 +186,13 @@ def inject_text(text: str) -> None:
         args=(target_count, restore_snap),
         daemon=True,
     ).start()
+
+
+def undo() -> None:
+    """Send Cmd+Z to the focused app to undo the last paste. No-op if AX not granted."""
+    if not is_ax_trusted():
+        return
+    for is_down in (True, False):
+        evt = CGEventCreateKeyboardEvent(None, _Z_KEYCODE, is_down)
+        CGEventSetFlags(evt, kCGEventFlagMaskCommand)
+        CGEventPost(kCGHIDEventTap, evt)

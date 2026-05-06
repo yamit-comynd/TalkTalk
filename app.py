@@ -202,6 +202,10 @@ class TalkTalkApp(rumps.App):
         # Silence auto-stop — tracks whether mic ever produced audio this recording
         self._recorder_had_audio = False
 
+        # Flag set by the thread-pool worker; read by _hud_tick on the main thread
+        # to trigger a history menu rebuild (NSMenu must only be touched on main thread).
+        self._history_needs_rebuild = False
+
         # Per-app profiles — tracks frontmost app (updated by _check_frontmost_app timer)
         self._current_bundle_id    = ""
         self._current_app_name     = ""
@@ -354,6 +358,12 @@ class TalkTalkApp(rumps.App):
         self._hud.tick(self.recorder.current_level, self._hud_state)
         self._loading_toast.tick()
 
+        # Deferred history menu rebuild — set by the thread-pool worker after
+        # a successful injection; executed here on the main thread.
+        if self._history_needs_rebuild:
+            self._history_needs_rebuild = False
+            self._rebuild_history_menu()
+
     # ------------------------------------------------------------------
     # Permission setup — one-shot timer (fires once after run loop starts)
     # ------------------------------------------------------------------
@@ -466,11 +476,17 @@ class TalkTalkApp(rumps.App):
         self._reinit_recorder()
 
         # 3. Restart the key listener — pynput wraps a CGEventTap which macOS
-        #    invalidates during sleep.  The thread stays alive but events stop
-        #    arriving; the only reliable fix is to tear it down and rebuild.
+        #    invalidates during sleep.  We delay by 2 s because pynput's new
+        #    listener thread calls TSMGetInputSourceProperty (HIToolbox) during
+        #    init, which on macOS 26 asserts it must run on the main dispatch
+        #    queue.  Immediately after wake, TSM state hasn't resettled yet and
+        #    the assertion fires.  A short delay lets the system fully resume
+        #    before we spin up a new listener thread.
         if self._im_granted:
-            log.info("Restarting key listener after wake")
-            self._start_key_listener()
+            log.info("Scheduling key listener restart (2 s post-wake delay)")
+            t = threading.Timer(2.0, self._start_key_listener)
+            t.daemon = True
+            t.start()
 
         log.info("Wake recovery complete")
 
@@ -915,9 +931,10 @@ class TalkTalkApp(rumps.App):
                     log.info("injection OK")
                     self._last_injected = transcript
 
-                    # Record in history.
+                    # Record in history. Menu rebuild is deferred to _hud_tick
+                    # (main thread) — NSMenu must never be touched from a background thread.
                     history.add(transcript, self._current_app_name)
-                    self._rebuild_history_menu()
+                    self._history_needs_rebuild = True
 
                     # Watch for user corrections and suggest vocab additions.
                     if self._cfg.get("correction_watch", True):

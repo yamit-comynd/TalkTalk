@@ -32,6 +32,14 @@ DEFAULTS: dict = {
     # Any key in the list can trigger recording.
     # "alt_r" = Right Option key — easy to hold, rarely conflicts
     "hotkeys": ["alt_r"],
+    # Phrases that undo the last injection instead of pasting new text.
+    "fix_phrases": ["fix that", "undo that", "scratch that", "delete that", "cancel that"],
+    # Auto-stop recording after this many seconds of silence (0 = disabled).
+    "silence_stop_delay": 0,
+    # Per-app language mode overrides: {bundle_id: {language_mode: ...}}
+    "profiles": {},
+    # Watch for post-injection corrections and suggest vocab additions.
+    "correction_watch": True,
 }
 
 

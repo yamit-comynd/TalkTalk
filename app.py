@@ -44,16 +44,21 @@ logging.basicConfig(
 log = logging.getLogger("talktalk")
 log.info("TalkTalk starting (pid=%d)", os.getpid())
 
+import re
+import threading
+
 import ollama
 
 import config
+import correction_watcher
 import device_manager
 import enhancer
+import history
 import key_capture
 import permissions
 import vocabulary
 from hud import HUD, LoadingToast, SOUND_START_DURATION
-from injector import inject_text
+from injector import inject_text, undo as undo_last_paste
 from recorder import AudioRecorder
 from transcriber import Transcriber
 
@@ -75,6 +80,19 @@ _SILENCE_TICKS_THRESHOLD = 30
 # many seconds late, the system must have been sleeping in the gap.
 _WAKE_HEARTBEAT   = 2.0
 _WAKE_GAP_THRESH  = 8.0
+
+# Silence auto-stop delay options shown in the submenu (label → seconds, 0 = off)
+_SILENCE_STOP_OPTIONS = [
+    ("Off",       0),
+    ("1 second",  1),
+    ("2 seconds", 2),
+    ("3 seconds", 3),
+]
+
+# Phrases (lowercased, punctuation stripped) that trigger undo instead of paste
+_DEFAULT_FIX_PHRASES = frozenset({
+    "fix that", "undo that", "scratch that", "delete that", "cancel that",
+})
 
 # Language mode display names
 _LANG_MODES = {
@@ -178,12 +196,26 @@ class TalkTalkApp(rumps.App):
         self._transcriber = None
         self._transcriber_model_size = self._cfg["model"]
 
+        # Last injected text — used by "fix that" and correction watcher
+        self._last_injected: str = ""
+
+        # Silence auto-stop — tracks whether mic ever produced audio this recording
+        self._recorder_had_audio = False
+
+        # Per-app profiles — tracks frontmost app (updated by _check_frontmost_app timer)
+        self._current_bundle_id    = ""
+        self._current_app_name     = ""
+        self._pre_profile_settings: dict = {}  # settings saved before profile was applied
+
         # Build submenus
-        self._mic_menu      = rumps.MenuItem("Microphone")
-        self._lang_menu     = rumps.MenuItem("Language")
-        self._whisper_menu  = rumps.MenuItem("Whisper Model")
-        self._llm_menu      = rumps.MenuItem("LLM Model")
-        self._hotkeys_menu  = rumps.MenuItem("Hotkeys")
+        self._mic_menu       = rumps.MenuItem("Microphone")
+        self._lang_menu      = rumps.MenuItem("Language")
+        self._whisper_menu   = rumps.MenuItem("Whisper Model")
+        self._llm_menu       = rumps.MenuItem("LLM Model")
+        self._hotkeys_menu   = rumps.MenuItem("Hotkeys")
+        self._profiles_menu  = rumps.MenuItem("App Profiles")
+        self._silence_menu   = rumps.MenuItem("Silence Auto-Stop")
+        self._history_menu   = rumps.MenuItem("Recent Dictations")
 
         self.menu = [
             self._mic_menu,
@@ -191,6 +223,11 @@ class TalkTalkApp(rumps.App):
             self._whisper_menu,
             self._llm_menu,
             self._hotkeys_menu,
+            self._profiles_menu,
+            None,
+            self._history_menu,
+            None,
+            self._silence_menu,
             None,
             rumps.MenuItem("Add vocabulary…",    callback=self._add_vocab),
             rumps.MenuItem("Edit vocabulary…",   callback=self._edit_vocab),
@@ -210,6 +247,9 @@ class TalkTalkApp(rumps.App):
         self._rebuild_whisper_menu()
         self._rebuild_llm_menu()
         self._rebuild_hotkeys_menu()
+        self._rebuild_profiles_menu()
+        self._rebuild_silence_menu()
+        self._rebuild_history_menu()
 
         # Snapshot permission state at launch so the poll timer can detect
         # transitions from denied → granted without false-positive notifications.
@@ -279,12 +319,17 @@ class TalkTalkApp(rumps.App):
                             "See ~/.talktalk/talktalk.log for details.",
                 )
 
-        # Silence detection: if recording is active but the mic produces near-zero
-        # audio for 1.5 s, the device is probably wrong or broken — notify once.
+        # Silence detection and auto-stop.
         if self._hud_state == "recording":
-            if self.recorder.current_level < _SILENCE_LEVEL_THRESHOLD:
+            if self.recorder.current_level >= _SILENCE_LEVEL_THRESHOLD:
+                self._silence_ticks    = 0
+                self._silence_notified = False
+                self._recorder_had_audio = True
+            else:
                 self._silence_ticks += 1
-                if (self._silence_ticks >= _SILENCE_TICKS_THRESHOLD
+                # No audio ever detected → likely a broken/wrong mic device.
+                if (not self._recorder_had_audio
+                        and self._silence_ticks >= _SILENCE_TICKS_THRESHOLD
                         and not self._silence_notified):
                     self._silence_notified = True
                     rumps.notification(
@@ -293,12 +338,18 @@ class TalkTalkApp(rumps.App):
                         message="Nothing is being captured. "
                                 "Open Microphone in the menu to switch.",
                     )
-            else:
-                self._silence_ticks    = 0
-                self._silence_notified = False
+                # Audio was detected and then went silent → auto-stop if configured.
+                if self._recorder_had_audio:
+                    stop_delay = self._cfg.get("silence_stop_delay", 0)
+                    if stop_delay > 0:
+                        stop_ticks = int(stop_delay / _HUD_TICK)
+                        if self._silence_ticks >= stop_ticks:
+                            log.info("Silence auto-stop after %.1fs of silence", stop_delay)
+                            self._stop_recording()
         else:
-            self._silence_ticks    = 0
-            self._silence_notified = False
+            self._silence_ticks      = 0
+            self._silence_notified   = False
+            self._recorder_had_audio = False
 
         self._hud.tick(self.recorder.current_level, self._hud_state)
         self._loading_toast.tick()
@@ -751,13 +802,13 @@ class TalkTalkApp(rumps.App):
             self._recording        = True
             self._recording_key    = key
             self._recorder_started = False
+            self._recorder_had_audio = False
             self.title             = _RECORDING
             self._hud_state        = "recording"
             HUD.play_start()
             # The sleep + recorder.start() are offloaded so the CGEventTap
             # callback returns immediately.  macOS can invalidate the tap
             # if its callback blocks for more than a few milliseconds.
-            import threading
             threading.Thread(target=self._open_mic_after_sound, daemon=True).start()
 
     def _open_mic_after_sound(self):
@@ -777,32 +828,38 @@ class TalkTalkApp(rumps.App):
             self.title          = _IDLE
             threading.Thread(target=self._reinit_recorder, daemon=True).start()
 
+    def _stop_recording(self):
+        """Stop the active recording and submit audio for transcription.
+        Safe to call from any thread (main thread via _hud_tick, or pynput thread
+        via _on_release). No-op if not currently recording."""
+        if not self._recording:
+            return
+        self._recording = False
+        HUD.play_stop()
+        if not self._recorder_started:
+            self.title      = _IDLE
+            self._hud_state = "hidden"
+            return
+        try:
+            audio = self.recorder.stop()
+        except Exception as exc:
+            log.warning("recorder.stop() failed: %s — reinitialising", exc)
+            self.title      = _IDLE
+            self._hud_state = "hidden"
+            threading.Thread(target=self._reinit_recorder, daemon=True).start()
+            return
+        duration = len(audio) / self.recorder.sample_rate
+        if duration < 0.3:
+            self.title      = _IDLE
+            self._hud_state = "hidden"
+            return
+        self.title      = _PROCESSING
+        self._hud_state = "processing"
+        self._executor.submit(self._transcribe_and_inject, audio)
+
     def _on_release(self, key):
         if key == self._recording_key and self._recording:
-            self._recording = False
-            HUD.play_stop()
-            if not self._recorder_started:
-                # Key released before mic even opened (very quick tap)
-                self.title      = _IDLE
-                self._hud_state = "hidden"
-                return
-            try:
-                audio = self.recorder.stop()
-            except Exception as exc:
-                log.warning("recorder.stop() failed: %s — reinitialising", exc)
-                self.title      = _IDLE
-                self._hud_state = "hidden"
-                import threading
-                threading.Thread(target=self._reinit_recorder, daemon=True).start()
-                return
-            duration = len(audio) / self.recorder.sample_rate
-            if duration < 0.3:
-                self.title      = _IDLE
-                self._hud_state = "hidden"
-                return
-            self.title      = _PROCESSING
-            self._hud_state = "processing"
-            self._executor.submit(self._transcribe_and_inject, audio)
+            self._stop_recording()
 
     # ------------------------------------------------------------------
     # Transcription + injection (runs in thread pool)
@@ -840,10 +897,34 @@ class TalkTalkApp(rumps.App):
 
             if not transcript:
                 log.warning("whisper returned empty transcript — nothing to paste")
+
+            if transcript and self._is_fix_phrase(transcript):
+                log.info("Fix phrase detected (%r) — undoing last injection", transcript)
+                undo_last_paste()
+                self._last_injected = ""
+                return
+
             if transcript:
+                # Snapshot the focused field BEFORE injection for correction watching.
+                field_before = None
+                if self._cfg.get("correction_watch", True):
+                    field_before = correction_watcher.read_focused_value()
+
                 try:
                     inject_text(transcript)
                     log.info("injection OK")
+                    self._last_injected = transcript
+
+                    # Record in history.
+                    history.add(transcript, self._current_app_name)
+                    self._rebuild_history_menu()
+
+                    # Watch for user corrections and suggest vocab additions.
+                    if self._cfg.get("correction_watch", True):
+                        correction_watcher.watch(
+                            transcript, field_before,
+                            callback=self._on_correction_detected,
+                        )
                 except PermissionError as exc:
                     log.error("injection permission denied: %s", exc)
                     # AX was revoked mid-session. Reset state and restart the
@@ -875,6 +956,26 @@ class TalkTalkApp(rumps.App):
         finally:
             self.title = _IDLE
             self._hud_state = "hidden"
+
+    def _is_fix_phrase(self, text: str) -> bool:
+        """Return True if the transcript is a "fix that" style undo command."""
+        normalized = re.sub(r"[^\w\s]", "", text).strip().lower()
+        phrases = {p.lower() for p in self._cfg.get("fix_phrases", list(_DEFAULT_FIX_PHRASES))}
+        return normalized in phrases
+
+    def _on_correction_detected(self, corrections: list[tuple[str, str]]) -> None:
+        """Called from correction_watcher daemon thread when user edits are detected."""
+        for orig, corrected in corrections:
+            log.info("Correction detected: %r → %r", orig, corrected)
+            rumps.notification(
+                title="TalkTalk — Learn correction?",
+                subtitle=f'"{orig}" → "{corrected}"',
+                message=f'Say "add to vocabulary" or open Add Vocabulary… to add "{corrected}".',
+            )
+            # Auto-add if the corrected word looks like a proper noun (capitalised).
+            if corrected and corrected[0].isupper() and corrected not in vocabulary.load():
+                vocabulary.add(corrected)
+                log.info("Auto-added correction %r to vocabulary", corrected)
 
     # ------------------------------------------------------------------
     # Vocabulary menu actions
@@ -959,6 +1060,175 @@ class TalkTalkApp(rumps.App):
             subtitle="Vocabulary updated",
             message=f"Added {added_count} word(s). {len(new_words) - added_count} already existed.",
         )
+
+
+    # ------------------------------------------------------------------
+    # History submenu
+    # ------------------------------------------------------------------
+
+    def _rebuild_history_menu(self):
+        if self._history_menu._menu is not None:
+            self._history_menu.clear()
+
+        entries = history.load()
+        if entries:
+            for i, entry in enumerate(entries[:10]):
+                text     = entry.get("text", "")
+                app_name = entry.get("app", "")
+                label    = (text[:50] + "…") if len(text) > 50 else text
+                if app_name:
+                    label += f"  [{app_name}]"
+
+                def make_reinject(t):
+                    def _reinject(_sender):
+                        try:
+                            inject_text(t)
+                            log.info("Re-injected from history: %r", t[:60])
+                        except Exception as exc:
+                            log.warning("Re-inject failed: %s", exc)
+                    return _reinject
+
+                item = rumps.MenuItem(f"{i + 1}. {label}", callback=make_reinject(text))
+                self._history_menu[f"_hist_{i}"] = item
+
+            self._history_menu["_hist_sep_"] = None
+
+        clear_item = rumps.MenuItem("Clear History", callback=self._clear_history)
+        self._history_menu["_hist_clear_"] = clear_item
+
+    def _clear_history(self, _):
+        history.clear()
+        self._rebuild_history_menu()
+
+    # ------------------------------------------------------------------
+    # Silence auto-stop submenu
+    # ------------------------------------------------------------------
+
+    def _rebuild_silence_menu(self):
+        if self._silence_menu._menu is not None:
+            self._silence_menu.clear()
+
+        current = self._cfg.get("silence_stop_delay", 0)
+        for label, seconds in _SILENCE_STOP_OPTIONS:
+            item = rumps.MenuItem(label, callback=self._select_silence_stop)
+            item.state = 1 if seconds == current else 0
+            self._silence_menu[label] = item
+
+    def _select_silence_stop(self, sender):
+        seconds = next(s for l, s in _SILENCE_STOP_OPTIONS if l == sender.title)
+        self._cfg["silence_stop_delay"] = seconds
+        config.save(self._cfg)
+        self._rebuild_silence_menu()
+
+    # ------------------------------------------------------------------
+    # Per-app profiles
+    # ------------------------------------------------------------------
+
+    @rumps.timer(2.0)
+    def _check_frontmost_app(self, _):
+        try:
+            from AppKit import NSWorkspace
+            app       = NSWorkspace.sharedWorkspace().frontmostApplication()
+            bundle_id = app.bundleIdentifier() or ""
+            app_name  = app.localizedName() or ""
+            if bundle_id != self._current_bundle_id:
+                self._current_bundle_id = bundle_id
+                self._current_app_name  = app_name
+                self._apply_app_profile(bundle_id)
+                self._rebuild_profiles_menu()
+        except Exception as exc:
+            log.debug("App profile check failed: %s", exc)
+
+    def _apply_app_profile(self, bundle_id: str) -> None:
+        # Restore any settings that were overridden by the previous profile.
+        if self._pre_profile_settings:
+            for key, val in self._pre_profile_settings.items():
+                self._cfg[key] = val
+            self._pre_profile_settings = {}
+            self._rebuild_lang_menu()
+
+        profiles = self._cfg.get("profiles", {})
+        if bundle_id not in profiles:
+            return
+
+        profile = profiles[bundle_id]
+        self._pre_profile_settings = {}
+
+        if "language_mode" in profile:
+            self._pre_profile_settings["language_mode"] = self._cfg.get("language_mode")
+            self._cfg["language_mode"] = profile["language_mode"]
+            self._rebuild_lang_menu()
+            log.info("Applied profile for %r: language_mode=%r", bundle_id, profile["language_mode"])
+
+    def _rebuild_profiles_menu(self):
+        if self._profiles_menu._menu is not None:
+            self._profiles_menu.clear()
+
+        profiles = self._cfg.get("profiles", {})
+        bundle   = self._current_bundle_id
+        app_name = self._current_app_name or bundle or "this app"
+        has_profile = bundle in profiles
+
+        # Current app status
+        status_label = f"Active: {app_name}" + (" ✓" if has_profile else "")
+        status_item  = rumps.MenuItem(status_label)
+        status_item.state = 0
+        self._profiles_menu["_prof_status_"] = status_item
+
+        self._profiles_menu["_prof_sep1_"] = None
+
+        # Save / clear for current app
+        save_item = rumps.MenuItem(
+            f"Save settings for {app_name}",
+            callback=self._save_profile,
+        )
+        self._profiles_menu["_prof_save_"] = save_item
+
+        if has_profile:
+            clear_item = rumps.MenuItem(
+                f"Clear profile for {app_name}",
+                callback=self._clear_current_profile,
+            )
+            self._profiles_menu["_prof_clear_"] = clear_item
+
+        # List all saved profiles
+        if profiles:
+            self._profiles_menu["_prof_sep2_"] = None
+            for bid, prof in profiles.items():
+                lang = prof.get("language_mode", "?")
+                label = f"{bid}  ({lang})"
+                item = rumps.MenuItem(label)
+                item.state = 1 if bid == bundle else 0
+                self._profiles_menu[f"_prof_{bid}_"] = item
+
+    def _save_profile(self, _):
+        if not self._current_bundle_id:
+            return
+        profiles = self._cfg.get("profiles", {})
+        profiles[self._current_bundle_id] = {
+            "language_mode": self._cfg.get("language_mode", "translate"),
+        }
+        self._cfg["profiles"] = profiles
+        config.save(self._cfg)
+        self._rebuild_profiles_menu()
+        rumps.notification(
+            title="TalkTalk",
+            subtitle=f"Profile saved for {self._current_app_name or self._current_bundle_id}",
+            message=f"Language mode: {self._cfg.get('language_mode', 'translate')}",
+        )
+
+    def _clear_current_profile(self, _):
+        profiles = self._cfg.get("profiles", {})
+        profiles.pop(self._current_bundle_id, None)
+        self._cfg["profiles"] = profiles
+        config.save(self._cfg)
+        # Restore pre-profile settings if a profile was active
+        if self._pre_profile_settings:
+            for key, val in self._pre_profile_settings.items():
+                self._cfg[key] = val
+            self._pre_profile_settings = {}
+            self._rebuild_lang_menu()
+        self._rebuild_profiles_menu()
 
 
 if __name__ == "__main__":
